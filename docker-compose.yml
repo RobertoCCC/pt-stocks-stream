@@ -1,0 +1,50 @@
+# Local development orchestrator.
+#
+# Brings up Redis, the poller (synthetic source so we don't depend on the
+# real Yahoo Finance endpoint), and the WebSocket fan-out server in one
+# command. The frontend (Next.js) is run separately with `npm run dev` in
+# the `web/` folder so HMR is responsive.
+#
+#     docker compose up --build
+#     # WebSocket endpoint:  ws://localhost:8080/ws
+#     # Health endpoint:     http://localhost:8080/healthz
+#
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  poller:
+    build: .
+    command: ["poller",
+              "-source=synthetic",
+              "-sink=redis",
+              "-redis-url=redis://redis:6379",
+              "-interval=2s",
+              "-timeout=1500ms",
+              "-log-format=text"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  wsserver:
+    build: .
+    command: ["wsserver",
+              "-addr=:8080",
+              "-redis-url=redis://redis:6379",
+              "-log-format=text"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
