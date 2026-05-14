@@ -1,6 +1,6 @@
 # pt-stocks-stream
 
-Real-time PSI-20 ticker built around the pattern most production trading and analytics platforms use: **one publisher → message bus → N stateless fan-out workers → browser clients**. The repo contains two Go binaries (`poller`, `wsserver`) that compose with Redis pub/sub and ship through Docker. A companion [`pt-stocks-stream-web`](https://github.com/RobertoCCC/pt-stocks-stream-web) repo holds the Next.js frontend.
+Real-time PSI-20 ticker built around the pattern most production trading and analytics platforms use: **one publisher → message bus → N stateless fan-out workers → browser clients**. The repo contains three Go binaries — `poller` and `wsserver` for the split-services shape, and `allinone` which collocates them in a single process for the Render free tier — all composing with Redis pub/sub and shipping through Docker. A companion [`pt-stocks-stream-web`](https://github.com/RobertoCCC/pt-stocks-stream-web) repo holds the Next.js frontend.
 
 ## Live demo
 
@@ -30,18 +30,33 @@ Real-time PSI-20 ticker built around the pattern most production trading and ana
 
 ```
 cmd/
-  poller/          # produces ticks, writes to stdout or Redis
-  wsserver/        # subscribes to Redis, exposes /ws and /healthz
+  poller/          # split-deploy publisher (CLI wrapper around internal/poller)
+  wsserver/        # split-deploy subscriber + WebSocket gateway
+  allinone/        # poller + wsserver in one process — what ships to Render's free tier
 internal/
+  poller/          # tick loop + retries + RedisWriter sink (reused by both shapes)
+  wsserver/        # hub, client lifecycle, HTTP handler
   quote/           # wire types shared by all components
   tickers/         # PSI-20 ticker list and helpers
   yahoo/           # Yahoo Finance v7 client (HTTP + retries)
   synthetic/       # geometric Brownian motion price walk for CI/dev
   redisbus/        # thin wrapper around go-redis pub/sub
-  wsserver/        # hub, client lifecycle, HTTP handler
-Dockerfile         # single image, both binaries
+Dockerfile         # single image, all three binaries
 docker-compose.yml # redis + poller + wsserver, ready for local hacking
+render.yaml        # one-service free-tier blueprint (runs `allinone`)
 ```
+
+### Two deploy shapes, one architecture
+
+The wire format and the goroutine boundaries are identical between the
+shapes — only the OS process layout changes. That's the whole point of
+keeping `internal/poller` and `internal/wsserver` as proper packages: the
+CLI binaries are just three different ways to wire them together.
+
+| Shape       | Process layout                                                | When to use                                        |
+| ----------- | ------------------------------------------------------------- | -------------------------------------------------- |
+| Split       | `poller` (1×) + `wsserver` (N×) talking via Redis             | Production at scale; what `docker-compose.yml` shows. |
+| All-in-one  | `allinone` (1×) — poller and hub in one process via Redis     | Render free tier (no background workers); demos.    |
 
 ## Quickstart (Docker)
 
@@ -109,6 +124,12 @@ go run ./cmd/wsserver \
 | `-redis-channel`        | `psi20.ticks`    | Channel the publisher writes to.                        |
 | `-allowed-origins`      | _(empty)_        | Comma-separated host patterns allowed to upgrade.       |
 | `-log-format`           | `json`           |                                                         |
+
+### `allinone`
+
+Superset of `poller` and `wsserver` flags — same defaults, same semantics.
+Used by the Render blueprint; locally you'd reach for `docker compose`
+instead.
 
 ## Design notes
 

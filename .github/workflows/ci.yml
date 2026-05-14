@@ -25,6 +25,7 @@ jobs:
         run: |
           go build -o /tmp/poller ./cmd/poller
           go build -o /tmp/wsserver ./cmd/wsserver
+          go build -o /tmp/allinone ./cmd/allinone
 
   docker:
     runs-on: ubuntu-latest

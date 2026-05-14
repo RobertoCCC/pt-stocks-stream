@@ -1,9 +1,14 @@
 # syntax=docker/dockerfile:1.7
 #
-# Single Dockerfile for both binaries. docker-compose picks which `command`
-# to run in each service. One image keeps the registry footprint small and
-# the build cache shared between the two binaries (they share 90% of their
-# dependency graph).
+# One Dockerfile, three binaries:
+#   - poller    : split-deploy publisher (paid Render plan or any worker host)
+#   - wsserver  : split-deploy subscriber + WebSocket gateway
+#   - allinone  : free-tier shape — poller + wsserver in one process, both
+#                 connected through the same Upstash Redis channel
+#
+# docker-compose picks `poller` and `wsserver` to demonstrate the split
+# architecture locally. Render's blueprint targets `allinone` so the whole
+# stack fits in a single free web service.
 
 FROM golang:1.26-alpine AS build
 WORKDIR /src
@@ -14,15 +19,17 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/poller ./cmd/poller \
- && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/wsserver ./cmd/wsserver
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/poller   ./cmd/poller   \
+ && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/wsserver ./cmd/wsserver \
+ && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/allinone ./cmd/allinone
 
 FROM alpine:3.20
 RUN adduser -D -u 10001 app && apk add --no-cache ca-certificates
 USER app
-COPY --from=build /out/poller /usr/local/bin/poller
+COPY --from=build /out/poller   /usr/local/bin/poller
 COPY --from=build /out/wsserver /usr/local/bin/wsserver
+COPY --from=build /out/allinone /usr/local/bin/allinone
 
-# Default to wsserver since that's the long-running, port-exposing one.
-# docker-compose overrides this for the poller service.
-CMD ["wsserver"]
+# Default to allinone since that's what the deployed image runs. Local
+# docker-compose overrides this per-service for the split-deploy demo.
+CMD ["allinone"]
