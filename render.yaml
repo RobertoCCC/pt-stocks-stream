@@ -1,0 +1,44 @@
+# Render Blueprint for pt-stocks-stream.
+#
+# Two services share one Docker image (the single Dockerfile at the repo
+# root builds both binaries). They both consume REDIS_URL from a shared
+# environment group so swapping the Redis provider is a one-line change.
+#
+# After importing this blueprint:
+#   1. Set REDIS_URL in the env group (Upstash rediss://… works on the free
+#      tier and gives you TLS for free).
+#   2. Set WS_ALLOWED_ORIGINS to the comma-separated Vercel host(s) of
+#      pt-stocks-stream-web.
+#
+# Frankfurt region matches the rest of the portfolio so latency to the
+# Lisbon stock exchange stays predictable.
+
+services:
+  - type: web
+    name: pt-stocks-stream-ws
+    region: frankfurt
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerCommand: wsserver -addr=:$PORT -redis-url=$REDIS_URL -log-format=json -allowed-origins=$WS_ALLOWED_ORIGINS
+    healthCheckPath: /healthz
+    envVars:
+      - fromGroup: pt-stocks-stream
+      - key: WS_ALLOWED_ORIGINS
+        sync: false # set in dashboard (csv of frontend hosts)
+
+  - type: worker
+    name: pt-stocks-stream-poller
+    region: frankfurt
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerCommand: poller -source=synthetic -sink=redis -redis-url=$REDIS_URL -interval=15s -timeout=8s -log-format=json
+    envVars:
+      - fromGroup: pt-stocks-stream
+
+envVarGroups:
+  - name: pt-stocks-stream
+    envVars:
+      - key: REDIS_URL
+        sync: false # set in dashboard (Upstash rediss://… URL)
