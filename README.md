@@ -5,8 +5,8 @@ Real-time PSI-20 ticker built around the pattern most production trading and ana
 ## Live demo
 
 - **Web app**: <https://pt-stocks-stream-web.vercel.app>
-- **WebSocket endpoint**: `wss://pt-stocks-stream-ws.onrender.com/ws`
-- **Health**: <https://pt-stocks-stream-ws.onrender.com/healthz>
+- **WebSocket endpoint**: `wss://pt-stocks-stream.onrender.com/ws`
+- **Health**: <https://pt-stocks-stream.onrender.com/healthz>
 
 > The Render free tier sleeps after ~15 minutes of inactivity. The first request after a sleep takes a few seconds to wake the service up; subsequent ticks arrive every 15 seconds.
 
