@@ -1,38 +1,31 @@
 // Command poller fetches PSI-20 quotes on a fixed interval and publishes
-// them to a downstream sink (stdout today, Redis pub/sub next).
+// them to a downstream sink (stdout for local dev, Redis pub/sub for the
+// split-services deployment shape).
 //
-// The binary is deliberately small: configuration via flags, one ticker loop,
-// retries with bounded exponential backoff, and graceful shutdown on SIGTERM.
-// The fetcher behind the loop is chosen at startup (real Yahoo Finance or a
-// synthetic random walk) so the same binary runs in production and in CI.
+// The actual ticker loop, retries, and JSON envelope live in
+// internal/poller — this binary is just flag parsing and wiring. The
+// cmd/allinone binary reuses internal/poller on a different shape (poller
+// and wsserver collocated in a single process, required by the Render free
+// tier which no longer supports background workers).
 package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/RobertoCCC/pt-stocks-stream/internal/quote"
+	"github.com/RobertoCCC/pt-stocks-stream/internal/poller"
 	"github.com/RobertoCCC/pt-stocks-stream/internal/redisbus"
 	"github.com/RobertoCCC/pt-stocks-stream/internal/synthetic"
 	"github.com/RobertoCCC/pt-stocks-stream/internal/tickers"
 	"github.com/RobertoCCC/pt-stocks-stream/internal/yahoo"
 )
-
-// fetcher is the contract the poller depends on. Defined locally so we don't
-// drag the yahoo/synthetic packages into a shared interface — idiomatic Go.
-type fetcher interface {
-	Fetch(ctx context.Context, symbols []string) ([]quote.Quote, error)
-}
 
 type config struct {
 	source       string
@@ -115,110 +108,17 @@ func main() {
 		"tickers", len(tickers.PSI20),
 	)
 
-	exitCode := run(ctx, logger, f, sink, cfg)
-	os.Exit(exitCode)
-}
-
-// run owns the main ticker loop. Extracted so tests can drive it with a fake
-// fetcher and a cancellable context.
-func run(ctx context.Context, logger *slog.Logger, f fetcher, sink io.Writer, cfg config) int {
-	ticker := time.NewTicker(cfg.interval)
-	defer ticker.Stop()
-
-	enc := json.NewEncoder(sink)
-	var seq atomic.Uint64
-
-	// Tick immediately on start so we don't wait `interval` before the first
-	// poll — keeps boot latency invisible to operators tailing logs.
-	tickOnce(ctx, logger, f, enc, &seq, cfg)
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Info("poller shutting down", "reason", ctx.Err())
-			return 0
-		case <-ticker.C:
-			tickOnce(ctx, logger, f, enc, &seq, cfg)
-		}
+	if err := poller.Run(ctx, logger, f, sink, poller.Config{
+		Interval: cfg.interval,
+		Timeout:  cfg.timeout,
+		MaxRetry: cfg.maxRetry,
+	}); err != nil {
+		logger.Error("poller run", "err", err)
+		os.Exit(1)
 	}
 }
 
-func tickOnce(parent context.Context, logger *slog.Logger, f fetcher, enc *json.Encoder, seq *atomic.Uint64, cfg config) {
-	fetchCtx, cancel := context.WithTimeout(parent, cfg.timeout)
-	defer cancel()
-
-	quotes, err := fetchWithRetry(fetchCtx, logger, f, cfg.maxRetry)
-	if err != nil {
-		logger.Error("fetch failed, skipping tick", "err", err)
-		return
-	}
-
-	msg := quote.Message{
-		Type:     quote.MsgTick,
-		Quotes:   quotes,
-		Seq:      seq.Add(1),
-		ServerTS: time.Now().UnixMilli(),
-	}
-	if err := enc.Encode(msg); err != nil {
-		// Sink errors are not recoverable (stdout closed, broken pipe). Log
-		// and let the next tick try again — kept simple intentionally.
-		logger.Error("encode message", "err", err)
-		return
-	}
-	logger.Debug("tick published", "seq", msg.Seq, "quotes", len(quotes))
-}
-
-// fetchWithRetry wraps a single fetch call with bounded exponential backoff.
-// Jitter is full (random in [0, base)) — recommended in AWS's "Exponential
-// Backoff And Jitter" article for avoiding thundering herds when many pollers
-// retry against the same upstream.
-func fetchWithRetry(ctx context.Context, logger *slog.Logger, f fetcher, maxRetry int) ([]quote.Quote, error) {
-	const baseDelay = 200 * time.Millisecond
-	const capDelay = 5 * time.Second
-
-	var lastErr error
-	for attempt := 0; attempt <= maxRetry; attempt++ {
-		quotes, err := f.Fetch(ctx, tickers.Symbols())
-		if err == nil {
-			return quotes, nil
-		}
-		lastErr = err
-
-		// Permanent failures (4xx that isn't 429): don't retry.
-		var httpErr *yahoo.HTTPError
-		if errors.As(err, &httpErr) && httpErr.Status >= 400 && httpErr.Status < 500 && httpErr.Status != 429 {
-			return nil, err
-		}
-
-		if attempt == maxRetry {
-			break
-		}
-		delay := backoff(attempt, baseDelay, capDelay)
-		logger.Warn("fetch error, retrying", "attempt", attempt+1, "delay", delay, "err", err)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(delay):
-		}
-	}
-	return nil, lastErr
-}
-
-func backoff(attempt int, base, cap time.Duration) time.Duration {
-	// 2^attempt * base, capped, then jittered to [0, computed).
-	exp := base << attempt
-	if exp <= 0 || exp > cap {
-		exp = cap
-	}
-	//nolint:gosec // not used for cryptography — full-jitter backoff
-	return time.Duration(float64(exp) * randFloat())
-}
-
-// randFloat is var-scoped so tests can stub determinism if needed. Default
-// uses the math/rand/v2 global which is automatically seeded per process.
-var randFloat = defaultRandFloat
-
-func pickFetcher(source string) fetcher {
+func pickFetcher(source string) poller.Fetcher {
 	switch source {
 	case "yahoo":
 		return yahoo.New()

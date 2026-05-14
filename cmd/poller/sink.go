@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/RobertoCCC/pt-stocks-stream/internal/poller"
 	"github.com/RobertoCCC/pt-stocks-stream/internal/redisbus"
 )
 
@@ -32,30 +33,9 @@ func openSink(ctx context.Context, cfg config) (io.Writer, func() error, error) 
 		if err != nil {
 			return nil, nil, err
 		}
-		w := &redisWriter{bus: bus, channel: cfg.redisChannel}
+		w := &poller.RedisWriter{Bus: bus, Channel: cfg.redisChannel}
 		return w, bus.Close, nil
 	default:
 		return nil, nil, errors.New("sink must be stdout|redis, got " + cfg.sink)
 	}
-}
-
-// redisWriter adapts a redis pub/sub channel to io.Writer so json.Encoder
-// can drive it unchanged. Each Write becomes one PUBLISH; this matches how
-// json.Encoder.Encode emits exactly one frame per call (object + newline).
-type redisWriter struct {
-	bus     *redisbus.Bus
-	channel string
-}
-
-// Write publishes the payload as-is. The newline appended by json.Encoder
-// is harmless on the wire and helps when humans inspect the channel with
-// `redis-cli SUBSCRIBE`.
-func (w *redisWriter) Write(p []byte) (int, error) {
-	// Use Background here: the json.Encoder doesn't carry our run context,
-	// and a per-tick publish should respect the network's own timeout via
-	// go-redis defaults rather than be cut short by a stale deadline.
-	if err := w.bus.Publish(context.Background(), w.channel, p); err != nil {
-		return 0, err
-	}
-	return len(p), nil
 }
